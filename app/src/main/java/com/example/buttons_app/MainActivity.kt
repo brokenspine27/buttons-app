@@ -11,6 +11,8 @@ import android.hardware.Sensor
 import android.hardware.SensorEvent
 import android.hardware.SensorEventListener
 import android.hardware.SensorManager
+import android.location.Location
+import android.location.LocationListener
 import android.location.LocationManager
 import android.net.wifi.WifiManager
 import android.os.Build
@@ -32,6 +34,7 @@ import androidx.compose.ui.platform.LocalLifecycleOwner
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
@@ -101,9 +104,11 @@ fun ControlPanelScreen(modifier: Modifier = Modifier) {
     var accelerometerData by remember { mutableStateOf("x: 0.0, y: 0.0, z: 0.0") }
     @Suppress("DEPRECATION")
     var wifiSpeed by remember { mutableStateOf(if (wifiManager.isWifiEnabled) wifiManager.connectionInfo.linkSpeed else 0) }
+    var gpsCoordinates by remember { mutableStateOf("Getting location...") }
 
     // This effect manages all the listeners and state updates.
     DisposableEffect(lifecycleOwner, context, bluetoothAdapter) {
+        // Sensor listener for accelerometer
         val sensorManager = context.getSystemService(Context.SENSOR_SERVICE) as SensorManager
         val accelerometer = sensorManager.getDefaultSensor(Sensor.TYPE_ACCELEROMETER)
         val sensorEventListener = object : SensorEventListener {
@@ -121,6 +126,7 @@ fun ControlPanelScreen(modifier: Modifier = Modifier) {
         }
         sensorManager.registerListener(sensorEventListener, accelerometer, SensorManager.SENSOR_DELAY_NORMAL)
 
+        // BroadcastReceiver for Bluetooth state changes
         val bluetoothReceiver = object : BroadcastReceiver() {
             override fun onReceive(context: Context, intent: Intent) {
                 if (intent.action == BluetoothAdapter.ACTION_STATE_CHANGED) {
@@ -131,7 +137,20 @@ fun ControlPanelScreen(modifier: Modifier = Modifier) {
         }
         val filter = IntentFilter(BluetoothAdapter.ACTION_STATE_CHANGED)
         context.registerReceiver(bluetoothReceiver, filter)
+        
+        // Location listener for GPS coordinates
+        val locationListener = object : LocationListener {
+            override fun onLocationChanged(location: Location) {
+                gpsCoordinates = "Lat: %.4f, Lon: %.4f".format(location.latitude, location.longitude)
+            }
+            @Deprecated("Deprecated in API 29")
+            override fun onStatusChanged(provider: String?, status: Int, extras: Bundle?) {}
+        }
+        if (ActivityCompat.checkSelfPermission(context, Manifest.permission.ACCESS_FINE_LOCATION) == PackageManager.PERMISSION_GRANTED) {
+            locationManager.requestLocationUpdates(LocationManager.GPS_PROVIDER, 5000L, 10f, locationListener)
+        }
 
+        // Lifecycle observer to refresh states on resume
         val lifecycleObserver = LifecycleEventObserver { _, event ->
             if (event == Lifecycle.Event.ON_RESUME) {
                 wifiState = wifiManager.isWifiEnabled
@@ -143,9 +162,11 @@ fun ControlPanelScreen(modifier: Modifier = Modifier) {
         }
         lifecycleOwner.lifecycle.addObserver(lifecycleObserver)
 
+        // Cleanup listeners on dispose
         onDispose {
             sensorManager.unregisterListener(sensorEventListener)
             context.unregisterReceiver(bluetoothReceiver)
+            locationManager.removeUpdates(locationListener)
             lifecycleOwner.lifecycle.removeObserver(lifecycleObserver)
         }
     }
@@ -210,7 +231,10 @@ fun ControlPanelScreen(modifier: Modifier = Modifier) {
                 }
             }
         ) {
-            Text(if (gpsState) "On" else "Off", fontSize = 18.sp, color = MaterialTheme.colorScheme.onBackground)
+            Text("Status: ${if (gpsState) "On" else "Off"}", fontSize = 18.sp, color = MaterialTheme.colorScheme.onBackground)
+            if (gpsState) {
+                Text(gpsCoordinates, fontSize = 18.sp, color = MaterialTheme.colorScheme.onBackground)
+            }
         }
         InfoCard(title = "Accelerometer") {
             Text(accelerometerData, fontSize = 18.sp, color = MaterialTheme.colorScheme.onBackground)

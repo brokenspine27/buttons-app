@@ -1,10 +1,11 @@
 package com.example.buttons_app
 
 import android.Manifest
-import android.app.Activity
 import android.bluetooth.BluetoothAdapter
+import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
+import android.content.IntentFilter
 import android.content.pm.PackageManager
 import android.hardware.Sensor
 import android.hardware.SensorEvent
@@ -17,7 +18,6 @@ import android.os.Bundle
 import android.provider.Settings
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
-import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
@@ -32,7 +32,6 @@ import androidx.compose.ui.platform.LocalLifecycleOwner
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
@@ -100,18 +99,11 @@ fun ControlPanelScreen(modifier: Modifier = Modifier) {
     var bluetoothState by remember { mutableStateOf(bluetoothAdapter?.isEnabled == true) }
     var gpsState by remember { mutableStateOf(locationManager.isProviderEnabled(LocationManager.GPS_PROVIDER)) }
     var accelerometerData by remember { mutableStateOf("x: 0.0, y: 0.0, z: 0.0") }
+    @Suppress("DEPRECATION")
+    var wifiSpeed by remember { mutableStateOf(if (wifiManager.isWifiEnabled) wifiManager.connectionInfo.linkSpeed else 0) }
 
-    // Refresh states on resume
-    DisposableEffect(lifecycleOwner) {
-        val observer = LifecycleEventObserver { _, event ->
-            if (event == Lifecycle.Event.ON_RESUME) {
-                wifiState = wifiManager.isWifiEnabled
-                bluetoothState = bluetoothAdapter?.isEnabled == true
-                gpsState = locationManager.isProviderEnabled(LocationManager.GPS_PROVIDER)
-            }
-        }
-        lifecycleOwner.lifecycle.addObserver(observer)
-
+    // This effect manages all the listeners and state updates.
+    DisposableEffect(lifecycleOwner, context, bluetoothAdapter) {
         val sensorManager = context.getSystemService(Context.SENSOR_SERVICE) as SensorManager
         val accelerometer = sensorManager.getDefaultSensor(Sensor.TYPE_ACCELEROMETER)
         val sensorEventListener = object : SensorEventListener {
@@ -125,22 +117,36 @@ fun ControlPanelScreen(modifier: Modifier = Modifier) {
                     }
                 }
             }
-
             override fun onAccuracyChanged(sensor: Sensor?, accuracy: Int) {}
         }
         sensorManager.registerListener(sensorEventListener, accelerometer, SensorManager.SENSOR_DELAY_NORMAL)
 
-        onDispose {
-            lifecycleOwner.lifecycle.removeObserver(observer)
-            sensorManager.unregisterListener(sensorEventListener)
+        val bluetoothReceiver = object : BroadcastReceiver() {
+            override fun onReceive(context: Context, intent: Intent) {
+                if (intent.action == BluetoothAdapter.ACTION_STATE_CHANGED) {
+                    val state = intent.getIntExtra(BluetoothAdapter.EXTRA_STATE, BluetoothAdapter.ERROR)
+                    bluetoothState = state == BluetoothAdapter.STATE_ON
+                }
+            }
         }
-    }
+        val filter = IntentFilter(BluetoothAdapter.ACTION_STATE_CHANGED)
+        context.registerReceiver(bluetoothReceiver, filter)
 
-    val enableBluetoothLauncher = rememberLauncherForActivityResult(
-        contract = ActivityResultContracts.StartActivityForResult()
-    ) { result ->
-        if (result.resultCode == Activity.RESULT_OK) {
-            bluetoothState = true
+        val lifecycleObserver = LifecycleEventObserver { _, event ->
+            if (event == Lifecycle.Event.ON_RESUME) {
+                wifiState = wifiManager.isWifiEnabled
+                @Suppress("DEPRECATION")
+                wifiSpeed = if (wifiState) wifiManager.connectionInfo.linkSpeed else 0
+                bluetoothState = bluetoothAdapter?.isEnabled == true
+                gpsState = locationManager.isProviderEnabled(LocationManager.GPS_PROVIDER)
+            }
+        }
+        lifecycleOwner.lifecycle.addObserver(lifecycleObserver)
+
+        onDispose {
+            sensorManager.unregisterListener(sensorEventListener)
+            context.unregisterReceiver(bluetoothReceiver)
+            lifecycleOwner.lifecycle.removeObserver(lifecycleObserver)
         }
     }
 
@@ -155,17 +161,9 @@ fun ControlPanelScreen(modifier: Modifier = Modifier) {
         }
     }
 
-    val toggleBluetooth: (Boolean) -> Unit = { enable ->
-        if (enable) {
-            val intent = Intent(BluetoothAdapter.ACTION_REQUEST_ENABLE)
-            enableBluetoothLauncher.launch(intent)
-        } else {
-            if (Build.VERSION.SDK_INT < Build.VERSION_CODES.S || ContextCompat.checkSelfPermission(context, Manifest.permission.BLUETOOTH_CONNECT) == PackageManager.PERMISSION_GRANTED) {
-                @Suppress("DEPRECATION")
-                bluetoothAdapter?.disable()
-                bluetoothState = false
-            }
-        }
+    val openBluetoothSettings = {
+        val intent = Intent(Settings.ACTION_BLUETOOTH_SETTINGS)
+        context.startActivity(intent)
     }
 
     val openLocationSettings = {
@@ -181,27 +179,47 @@ fun ControlPanelScreen(modifier: Modifier = Modifier) {
         horizontalAlignment = Alignment.CenterHorizontally,
         verticalArrangement = Arrangement.spacedBy(16.dp)
     ) {
-        InfoCard(title = "Wi-Fi", value = if (wifiState) "On" else "Off") {
-            Button(onClick = { toggleWifi(!wifiState) }) {
-                Text(if (wifiState) "Turn Off" else "Turn On")
+        InfoCard(
+            title = "Wi-Fi",
+            buttonContent = {
+                Button(onClick = { toggleWifi(!wifiState) }) {
+                    Text(if (wifiState) "Turn Off" else "Turn On")
+                }
+            }
+        ) {
+            Text("Status: ${if (wifiState) "On" else "Off"}", fontSize = 18.sp, color = MaterialTheme.colorScheme.onBackground)
+            if (wifiState) {
+                Text("Speed: $wifiSpeed Mbps", fontSize = 18.sp, color = MaterialTheme.colorScheme.onBackground)
             }
         }
-        InfoCard(title = "Bluetooth", value = if (bluetoothState) "On" else "Off") {
-            Button(onClick = { toggleBluetooth(!bluetoothState) }) {
-                Text(if (bluetoothState) "Turn Off" else "Turn On")
+        InfoCard(
+            title = "Bluetooth",
+            buttonContent = {
+                Button(onClick = openBluetoothSettings) {
+                    Text("Settings")
+                }
             }
+        ) {
+            Text(if (bluetoothState) "On" else "Off", fontSize = 18.sp, color = MaterialTheme.colorScheme.onBackground)
         }
-        InfoCard(title = "GPS", value = if (gpsState) "On" else "Off") {
-            Button(onClick = openLocationSettings) {
-                Text("Settings")
+        InfoCard(
+            title = "GPS",
+            buttonContent = {
+                Button(onClick = openLocationSettings) {
+                    Text("Settings")
+                }
             }
+        ) {
+            Text(if (gpsState) "On" else "Off", fontSize = 18.sp, color = MaterialTheme.colorScheme.onBackground)
         }
-        InfoCard(title = "Accelerometer", value = accelerometerData)
+        InfoCard(title = "Accelerometer") {
+            Text(accelerometerData, fontSize = 18.sp, color = MaterialTheme.colorScheme.onBackground)
+        }
     }
 }
 
 @Composable
-fun InfoCard(title: String, value: String, content: @Composable () -> Unit = {}) {
+fun InfoCard(title: String, buttonContent: @Composable () -> Unit = {}, valueContent: @Composable ColumnScope.() -> Unit) {
     Card(
         modifier = Modifier
             .fillMaxWidth(),
@@ -234,14 +252,10 @@ fun InfoCard(title: String, value: String, content: @Composable () -> Unit = {})
                     color = MaterialTheme.colorScheme.onBackground
                 )
                 Spacer(modifier = Modifier.height(4.dp))
-                Text(
-                    text = value,
-                    fontSize = 18.sp,
-                    color = MaterialTheme.colorScheme.onBackground
-                )
+                valueContent()
             }
             Box(modifier = Modifier.padding(16.dp)) {
-                content()
+                buttonContent()
             }
         }
     }
